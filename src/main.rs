@@ -4,6 +4,7 @@ extern crate minifb;
 // std
 use std::env;
 use std::thread;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -14,8 +15,31 @@ use minifb::{Key, WindowOptions, Window};
 // Consts
 const WIDTH: usize = 64;
 const HEIGHT: usize = 32;
-const SCALE: usize = 8;
+const SCALE: usize = 2;
 const COLOR: u32 = 65280;
+
+// I cant believe this
+fn get_key_value(key: Key) -> u16 {
+    match key {
+        Key::Key0 => 0,
+        Key::Key1 => 1,
+        Key::Key2 => 2,
+        Key::Key3 => 3,
+        Key::Key4 => 4,
+        Key::Key5 => 5,
+        Key::Key6 => 6,
+        Key::Key7 => 7,
+        Key::Key8 => 8,
+        Key::Key9 => 9,
+        Key::A => 10,
+        Key::B => 11,
+        Key::C => 12,
+        Key::D => 13,
+        Key::E => 14,
+        Key::F => 15,
+        _ => 255
+    }
+}
 
 fn main() {
     let mut file = File::open("./static/GUESS").expect("file not found");
@@ -44,12 +68,25 @@ fn main() {
     });
 
     while window.is_open() {
-        chip.step(&mut buffer);
+        let keys = window.get_keys();
+        let mut selected_key = None;
+
+        if keys.is_some() {
+            let keys = keys.unwrap();
+            for key in keys.iter() {
+                if get_key_value(key.clone()) < 16 {
+                    selected_key = Some(get_key_value(key.clone()));
+                    break;
+                }
+            }
+        }
+
+        chip.step(&selected_key);
 
         //window.update_with_buffer(&buffer).unwrap();
         chip.render_to_window(&mut buffer, &mut window);
 
-        thread::sleep_ms(1);
+        //thread::sleep_ms(1);
     }
 }
 
@@ -110,7 +147,7 @@ impl Chip {
         window.update_with_buffer(&buffer).unwrap();
     }
 
-    pub fn step(&mut self, buffer: &mut Vec<u32>) {
+    pub fn step(&mut self, key: &Option<u16>) {
         let pc = self.pc as usize;
         let op: u16 = ((self.memory[pc] as u16) << 8) + self.memory[(pc + 1)] as u16;
 
@@ -118,8 +155,8 @@ impl Chip {
             0x0 => {
                 if get_last_byte(op) == 0xE0 {
                     // Clear screen
-                    for pixel in buffer.iter_mut() {
-                        *pixel = 0;
+                    for pixel in self.screen.iter_mut() {
+                        *pixel = false;
                     }
 
                     self.pc = self.pc + 2;
@@ -260,6 +297,13 @@ impl Chip {
             0xF => {
                 match get_last_byte(op) {
                     0x0A => {
+                        if key.is_some() {
+                            let key = key.unwrap();
+                            self.registers[get_second_nibble(op) as usize] = key as u8;
+                            println!("{}", key as u8);
+
+                            self.pc = self.pc + 2;
+                        }
                     },
                     0x1E => {
                         let reg = get_second_nibble(op) as usize;
