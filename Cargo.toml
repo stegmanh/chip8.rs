@@ -5,4 +5,4 @@ authors = ["stegmanh <stegman.holden@gmail.com>"]
 
 [dependencies]
 rand = "0.5"
-minifb = "0.10.6"
+minifb = { git = "https://github.com/stegmanh/rust_minifb.git" } 

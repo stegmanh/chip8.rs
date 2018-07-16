@@ -10,7 +10,7 @@ use std::io::prelude::*;
 
 // externs
 use rand::prelude::*;
-use minifb::{Key, WindowOptions, Window};
+use minifb::{Key, KeyRepeat, WindowOptions, Window, Scale};
 
 // Consts
 const WIDTH: usize = 64;
@@ -19,26 +19,8 @@ const SCALE: usize = 2;
 const COLOR: u32 = 65280;
 
 // I cant believe this
-fn get_key_value(key: Key) -> u16 {
-    match key {
-        Key::Key0 => 0,
-        Key::Key1 => 1,
-        Key::Key2 => 2,
-        Key::Key3 => 3,
-        Key::Key4 => 4,
-        Key::Key5 => 5,
-        Key::Key6 => 6,
-        Key::Key7 => 7,
-        Key::Key8 => 8,
-        Key::Key9 => 9,
-        Key::A => 10,
-        Key::B => 11,
-        Key::C => 12,
-        Key::D => 13,
-        Key::E => 14,
-        Key::F => 15,
-        _ => 255
-    }
+fn get_key_value(key: &Key) -> u16 {
+    *key as u16
 }
 
 fn main() {
@@ -60,22 +42,25 @@ fn main() {
     let mut chip = Chip::new(buffer);
 
     let mut buffer: Vec<u32> = vec![0; WIDTH * SCALE * HEIGHT * SCALE];
-    let mut window = Window::new("Test - ESC to exit",
+
+    let mut window_options = WindowOptions::default();
+    window_options.scale = Scale::X4;
+    let mut window = Window::new("Chip8",
                                 WIDTH * SCALE,
                                 HEIGHT * SCALE,
-                                WindowOptions::default()).unwrap_or_else(|e| {
+                                window_options).unwrap_or_else(|e| {
         panic!("{}", e);
     });
 
     while window.is_open() {
-        let keys = window.get_keys();
+        let keys = window.get_keys_pressed(KeyRepeat::No);
         let mut selected_key = None;
 
         if keys.is_some() {
             let keys = keys.unwrap();
             for key in keys.iter() {
-                if get_key_value(key.clone()) < 16 {
-                    selected_key = Some(get_key_value(key.clone()));
+                if *key <= Key::F {
+                    selected_key = Some(get_key_value(key));
                     break;
                 }
             }
@@ -83,10 +68,7 @@ fn main() {
 
         chip.step(&selected_key);
 
-        //window.update_with_buffer(&buffer).unwrap();
         chip.render_to_window(&mut buffer, &mut window);
-
-        //thread::sleep_ms(1);
     }
 }
 
