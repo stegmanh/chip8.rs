@@ -4,7 +4,7 @@ extern crate minifb;
 // std
 use std::env;
 use std::thread;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::prelude::*;
 use std::time::{Instant, Duration};
@@ -72,26 +72,29 @@ fn main() {
         panic!("{}", e);
     });
 
+    let mut prev_pressed_keys = BTreeSet::new();
     let mut prev = Instant::now();
     while window.is_open() {
-        let keys = window.get_keys_pressed(KeyRepeat::No);
-        let mut selected_key = None;
-
-        if keys.is_some() {
-            let keys = keys.unwrap();
-            for key in keys.iter() {
-                if *key <= Key::F {
-                    selected_key = Some(get_key_value(key));
-                    break;
-                }
-            }
+        let mut current_pressed_keys: BTreeSet<Key> = BTreeSet::new();
+        {
+            window.get_keys()
+                .unwrap().iter()
+                .for_each(|k| { current_pressed_keys.insert(*k); });
         }
 
-        
+        let ppkc = prev_pressed_keys.clone();
+        let mut pressed_keys = ppkc.difference(&current_pressed_keys);
+        let selected_key = pressed_keys.nth(0).map(|v| get_key_value(v));
+        if selected_key.is_some() {
+            prev_pressed_keys.clear();
+        } else {
+            prev_pressed_keys = current_pressed_keys.clone();
+        }
+
         let now = Instant::now();
         let elapsed = now.duration_since(prev);
         // Yeah yeah this isnt technically correct
-        if elapsed.subsec_millis() as f64 > 16.66f64 {
+        if elapsed.subsec_millis() as f64 > (1000f64 * 1f64/60f64) {
             prev = now;
             chip.decrement_delay();
         }
