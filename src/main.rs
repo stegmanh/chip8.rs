@@ -7,6 +7,7 @@ use std::thread;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::prelude::*;
+use std::time::{Instant, Duration};
 
 // externs
 use rand::prelude::*;
@@ -18,13 +19,32 @@ const HEIGHT: usize = 32;
 const SCALE: usize = 2;
 const COLOR: u32 = 65280;
 
+const SPRITES: [[u8; 5]; 16] = [
+    [0xF0, 0x90, 0x90, 0x90, 0xF0], // 0
+    [0x20, 0x60, 0x20, 0x20, 0x70], // 1
+    [0xF0, 0x10, 0xF0, 0x80, 0xF0], // 2
+    [0xF0, 0x10, 0xF0, 0x10, 0xF0], // 3
+    [0x90, 0x90, 0xF0, 0x10, 0x10], // 4
+    [0xF0, 0x80, 0xF0, 0x10, 0xF0], // 5
+    [0xF0, 0x80, 0xF0, 0x90, 0xF0], // 6
+    [0xF0, 0x10, 0x20, 0x40, 0x40], // 7
+    [0xF0, 0x90, 0xF0, 0x90, 0xF0], // 8
+    [0xF0, 0x90, 0xF0, 0x10, 0xF0], // 9
+    [0xF0, 0x90, 0xF0, 0x90, 0x90], // A
+    [0xE0, 0x90, 0xE0, 0x90, 0xE0], // B
+    [0xF0, 0x80, 0x80, 0x80, 0xF0], // C
+    [0xE0, 0x90, 0x90, 0x90, 0xE0], // D
+    [0xF0, 0x80, 0xF0, 0x80, 0xF0], // E
+    [0xF0, 0x80, 0xF0, 0x80, 0x80], // F
+];
+
 // I cant believe this
 fn get_key_value(key: &Key) -> u16 {
     *key as u16
 }
 
 fn main() {
-    let mut file = File::open("./static/GUESS").expect("file not found");
+    let mut file = File::open("./static/MERLIN").expect("file not found");
     let mut buffer: Vec<u8> = Vec::new();
     file.read_to_end(&mut buffer).unwrap();
 
@@ -52,6 +72,7 @@ fn main() {
         panic!("{}", e);
     });
 
+    let mut prev = Instant::now();
     while window.is_open() {
         let keys = window.get_keys_pressed(KeyRepeat::No);
         let mut selected_key = None;
@@ -64,6 +85,15 @@ fn main() {
                     break;
                 }
             }
+        }
+
+        
+        let now = Instant::now();
+        let elapsed = now.duration_since(prev);
+        // Yeah yeah this isnt technically correct
+        if elapsed.subsec_millis() as f64 > 16.66f64 {
+            prev = now;
+            chip.decrement_delay();
         }
 
         chip.step(&selected_key);
@@ -86,8 +116,14 @@ struct Chip {
 
 impl Chip {
     pub fn new(program: Vec<u8>) -> Self {
-        assert!(program.len() % 2 == 0);
+        //assert!(program.len() % 2 == 0);
         let mut memory = [0; 4096];
+
+        for (sprite_idx, sprite) in SPRITES.iter().enumerate() {
+            for (index, byte) in sprite.iter().enumerate() {
+                memory[5 * sprite_idx + index] = *byte;
+            }
+        }
 
         for i in 0..program.len() {
             memory[i + 0x200] = program[i]
@@ -103,6 +139,12 @@ impl Chip {
             pc: 0x200,
             sp: 0,
             stack: [0; 16]
+        }
+    }
+
+    pub fn decrement_delay(&mut self) {
+        if self.delay > 0 {
+            self.delay = self.delay - 1;
         }
     }
 
@@ -180,6 +222,13 @@ impl Chip {
 
                 self.pc = self.pc + 2;
             },
+            0x5 => {
+                if self.registers[get_second_nibble(op) as usize] == self.registers[get_third_nibble(op) as usize] {
+                    self.pc = self.pc + 2;
+                }
+
+                self.pc = self.pc + 2;
+            },
             0x6 => {
                 // The interpreter puts the value kk into register Vx. 
                 let reg = get_second_nibble(op) as usize;
@@ -209,6 +258,14 @@ impl Chip {
                         let y = self.registers[get_third_nibble(op) as usize];
 
                         self.registers[get_second_nibble(op) as usize] = x & y;
+
+                        self.pc = self.pc + 2;
+                    },
+                    3 => {
+                        let x = self.registers[get_second_nibble(op) as usize];
+                        let y = self.registers[get_third_nibble(op) as usize];
+
+                        self.registers[get_second_nibble(op) as usize] = x ^ y;
 
                         self.pc = self.pc + 2;
                     },
@@ -276,6 +333,10 @@ impl Chip {
 
                 self.pc = self.pc + 2;
             },
+            0xE => {
+                panic!("Bad E");
+                self.pc = self.pc + 2;
+            },
             0xF => {
                 match get_last_byte(op) {
                     0x0A => {
@@ -287,6 +348,16 @@ impl Chip {
                             self.pc = self.pc + 2;
                         }
                     },
+                    0x07 => {
+                        self.registers[get_second_nibble(op) as usize] = self.delay;
+
+                        self.pc = self.pc + 2;
+                    },
+                    0x15 => {
+                        self.delay = self.registers[get_second_nibble(op) as usize];
+
+                        self.pc = self.pc + 2;
+                    },
                     0x1E => {
                         let reg = get_second_nibble(op) as usize;
                         let reg_value = self.registers[reg];
@@ -294,12 +365,26 @@ impl Chip {
 
                         self.pc = self.pc + 2;
                     },
+                    0x29 => {
+                        println!("{:X}", op);
+                        self.i = self.registers[get_second_nibble(op) as usize] as u16 * 5;
+
+                        self.pc = self.pc + 2;
+                    }
                     0x33 => {
                         let value = self.registers[get_second_nibble(op) as usize];
                         // There has to be another way to do this lol
                         self.memory[self.i as usize] = value / 100;
                         self.memory[self.i as usize + 1] = (value % 100) / 10;
                         self.memory[self.i as usize + 2] = value % 100 % 10;
+
+                        self.pc = self.pc + 2;
+                    },
+                    0x55 => {
+                        let x = get_second_nibble(op);
+                        for idx in 0..=x {
+                            self.memory[(self.i + idx as u16) as usize] = self.registers[idx as usize];
+                        }
 
                         self.pc = self.pc + 2;
                     },
