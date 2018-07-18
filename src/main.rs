@@ -1,7 +1,10 @@
+// Locals
+mod utils;
+// Externs
 extern crate rand;
 extern crate minifb;
 
-// std
+// Standard Library
 use std::env;
 use std::thread;
 use std::collections::BTreeSet;
@@ -9,16 +12,18 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::time::{Instant, Duration};
 
-// externs
+// Local
+use utils::*;
+
+// Externs
 use rand::prelude::*;
 use minifb::{Key, KeyRepeat, WindowOptions, Window, Scale};
 
-// Consts
+// Constants
 const WIDTH: usize = 64;
 const HEIGHT: usize = 32;
 const SCALE: usize = 2;
 const COLOR: u32 = 65280;
-
 const SPRITES: [[u8; 5]; 16] = [
     [0xF0, 0x90, 0x90, 0x90, 0xF0], // 0
     [0x20, 0x60, 0x20, 0x20, 0x70], // 1
@@ -38,13 +43,8 @@ const SPRITES: [[u8; 5]; 16] = [
     [0xF0, 0x80, 0xF0, 0x80, 0x80], // F
 ];
 
-// I cant believe this
-fn get_key_value(key: &Key) -> u16 {
-    *key as u16
-}
-
 fn main() {
-    let mut file = File::open("./static/MERLIN").expect("file not found");
+    let mut file = File::open("./static/BRIX").expect("file not found");
     let mut buffer: Vec<u8> = Vec::new();
     file.read_to_end(&mut buffer).unwrap();
 
@@ -74,17 +74,16 @@ fn main() {
 
     let mut prev_pressed_keys = BTreeSet::new();
     let mut prev = Instant::now();
+
     while window.is_open() {
-        let mut current_pressed_keys: BTreeSet<Key> = BTreeSet::new();
-        {
-            window.get_keys()
-                .unwrap().iter()
-                .for_each(|k| { current_pressed_keys.insert(*k); });
-        }
+        let mut current_pressed_keys = BTreeSet::new();
+        window.get_keys()
+            .unwrap().iter()
+            .for_each(|k| { current_pressed_keys.insert(get_key_value(k)); });
 
         let ppkc = prev_pressed_keys.clone();
         let mut pressed_keys = ppkc.difference(&current_pressed_keys);
-        let selected_key = pressed_keys.nth(0).map(|v| get_key_value(v));
+        let selected_key = pressed_keys.nth(0).map(|k| *k);
         if selected_key.is_some() {
             prev_pressed_keys.clear();
         } else {
@@ -93,13 +92,14 @@ fn main() {
 
         let now = Instant::now();
         let elapsed = now.duration_since(prev);
-        // Yeah yeah this isnt technically correct
-        if elapsed.subsec_millis() as f64 > (1000f64 * 1f64/60f64) {
+
+        // Meh
+        if elapsed > Duration::from_micros(16666) {
             prev = now;
             chip.decrement_delay();
         }
 
-        chip.step(&selected_key);
+        chip.step(&selected_key, &current_pressed_keys);
 
         chip.render_to_window(&mut buffer, &mut window);
     }
@@ -152,6 +152,27 @@ impl Chip {
     }
 
     #[inline(always)]
+    fn increment_pc(&mut self) {
+        self.pc = self.pc + 2;
+    }
+
+    #[inline(always)]
+    pub fn get_x_reg_value(&self, op: u16) -> u8 {
+        self.registers[get_second_nibble(op) as usize]
+    }
+
+    #[inline(always)]
+    pub fn get_y_reg_value(&self, op: u16) -> u8 {
+        self.registers[get_third_nibble(op) as usize]
+    }
+
+    #[inline(always)]
+    pub fn set_x_reg_value(&mut self, op: u16, val: u8) {
+        let reg = get_second_nibble(op) as usize;
+        self.registers[reg] = val;
+    }
+
+    #[inline(always)]
     pub fn render_to_window(&self, buffer: &mut Vec<u32>, window: &mut Window) {
         // This was a toughy to write..
         for (original_index, is_on) in self.screen.iter().enumerate() {
@@ -174,26 +195,28 @@ impl Chip {
         window.update_with_buffer(&buffer).unwrap();
     }
 
-    pub fn step(&mut self, key: &Option<u16>) {
+    pub fn step(&mut self, key: &Option<u16>, keys: &BTreeSet<u16>) {
         let pc = self.pc as usize;
         let op: u16 = ((self.memory[pc] as u16) << 8) + self.memory[(pc + 1)] as u16;
 
         match get_first_nibble(op) {
             0x0 => {
-                if get_last_byte(op) == 0xE0 {
-                    // Clear screen
-                    for pixel in self.screen.iter_mut() {
-                        *pixel = false;
-                    }
+                match get_last_byte(op) {
+                    0xE0 => {
+                        // Clear screen
+                        for pixel in self.screen.iter_mut() {
+                            *pixel = false;
+                        }
 
-                    self.pc = self.pc + 2;
-                } else if get_last_byte(op) == 0xEE {
-                    // Return -- yay!
-                    self.pc = self.stack[self.sp as usize];
-                    self.stack[self.sp as usize] = 0;
-                    self.sp = self.sp - 1;
-                } else {
-                    panic!("Hmm");
+                        self.increment_pc();
+                    },
+                    0xEE => {
+                        // Return
+                        self.pc = self.stack[self.sp as usize];
+                        self.stack[self.sp as usize] = 0;
+                        self.sp = self.sp - 1;
+                    },
+                    _ => invalid_instruction(op)
                 }
             },
             0x1 => {
@@ -201,6 +224,7 @@ impl Chip {
                 self.pc = get_addr(op);
             },
             0x2 => {
+                // Call subroutine
                 let next_addr = get_addr(op);
                 self.sp = self.sp + 1;
                 self.stack[self.sp as usize] = self.pc + 2;
@@ -208,89 +232,100 @@ impl Chip {
                 self.pc = next_addr;
             },
             0x3 => {
-                let reg = get_second_nibble(op) as usize;
-                let reg_value = self.registers[reg];
-                if reg_value == get_last_byte(op) {
-                    self.pc = self.pc + 2;
+                // Jmp if Eq
+                if self.get_x_reg_value(op) == get_last_byte(op) {
+                    self.increment_pc();
                 }
 
-                self.pc = self.pc + 2;
+                self.increment_pc();
             },
             0x4 => {
-                let reg = get_second_nibble(op) as usize;
-                let reg_value = self.registers[reg];
-                if reg_value != get_last_byte(op) {
-                    self.pc = self.pc + 2;
+                // Jmp if NEq
+                if self.get_x_reg_value(op) != get_last_byte(op) {
+                    self.increment_pc();
                 }
 
-                self.pc = self.pc + 2;
+                self.increment_pc();
             },
             0x5 => {
-                if self.registers[get_second_nibble(op) as usize] == self.registers[get_third_nibble(op) as usize] {
-                    self.pc = self.pc + 2;
+                // Jump if reg x == reg y
+                if self.get_x_reg_value(op) == self.get_y_reg_value(op) {
+                    self.increment_pc();
                 }
 
-                self.pc = self.pc + 2;
+                self.increment_pc();
             },
             0x6 => {
                 // The interpreter puts the value kk into register Vx. 
-                let reg = get_second_nibble(op) as usize;
                 let val = get_last_byte(op);
-                self.registers[reg] = val;
+                self.set_x_reg_value(op, val);
 
-                self.pc = self.pc + 2;
+                self.increment_pc();
             },
             0x7 => {
                 //Adds the value kk to the value of register Vx, then stores the result in Vx. 
-                let reg = get_second_nibble(op) as usize;
-                let add = get_last_byte(op);
-                self.registers[reg] = self.registers[reg] + add;
+                let result = self.get_x_reg_value(op) as u16 + get_last_byte(op) as u16;
+                self.set_x_reg_value(op, result as u8);
 
-                self.pc = self.pc + 2;
+                self.increment_pc();
             },
             0x8 => {
                 match get_last_nibble(op) {
-                    0 => {
-                        //Stores the value of register Vy in register Vx.
-                        self.registers[get_second_nibble(op) as usize] = self.registers[get_third_nibble(op) as usize];
+                    0x0 => {
+                        // Stores the value of register Vy in register Vx.
+                        let y = self.get_y_reg_value(op);
+                        self.set_x_reg_value(op, y);
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
-                    2 => {
-                        let x = self.registers[get_second_nibble(op) as usize];
-                        let y = self.registers[get_third_nibble(op) as usize];
+                    0x2 => {
+                        // X & Y stores in X
+                        let x = self.get_x_reg_value(op);
+                        let y = self.get_y_reg_value(op);
+                        self.set_x_reg_value(op, x & y);
 
-                        self.registers[get_second_nibble(op) as usize] = x & y;
-
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
-                    3 => {
-                        let x = self.registers[get_second_nibble(op) as usize];
-                        let y = self.registers[get_third_nibble(op) as usize];
+                    0x3 => {
+                        // X XOR Y stores in X
+                        let x = self.get_x_reg_value(op);
+                        let y = self.get_y_reg_value(op);
+                        self.set_x_reg_value(op, x ^ y);
 
-                        self.registers[get_second_nibble(op) as usize] = x ^ y;
-
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
-                    4 => {
-                        let x = self.registers[get_second_nibble(op) as usize];
-                        let y = self.registers[get_third_nibble(op) as usize];
+                    0x4 => {
+                        let x = self.get_x_reg_value(op);
+                        let y = self.get_y_reg_value(op);
+
                         let sum = x as u16 + y as u16;
                         if sum > 255 {
                             self.registers[0xF] = 1; 
                         }
-                        
-                        self.registers[get_second_nibble(op) as usize] = sum as u8;
+                        self.set_x_reg_value(op, sum as u8);
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
-                    _ => panic!("Unsupported 8 {:X}", op)
+                    0x5 => {
+                        let x = self.registers[get_second_nibble(op) as usize];
+                        let y = self.registers[get_third_nibble(op) as usize];
+                        if x > y {
+                            self.registers[0xF] = 1;
+                            // ?? Moved here from below
+                            self.registers[get_second_nibble(op) as usize] = x - y;
+                        } else {
+                            self.registers[0xF] = 0;
+                        }
+
+                        self.increment_pc();
+                    },
+                    _ => invalid_instruction(op)
                 }
             },
             0xA => {
                 // The value of register I is set to nnn.
                 self.i = get_addr(op);
-                self.pc = self.pc + 2;
+                self.increment_pc();
             },
             0xC => {
                 // The interpreter generates a random number from 0 to 255, 
@@ -301,7 +336,7 @@ impl Chip {
 
                 let reg = get_second_nibble(op) as usize;
                 self.registers[reg] = val;
-                self.pc = self.pc + 2;
+                self.increment_pc();
             },
             0xD => {
                 let i = self.i as usize;
@@ -334,11 +369,24 @@ impl Chip {
                     }
                 }
 
-                self.pc = self.pc + 2;
+                self.increment_pc();
             },
             0xE => {
-                panic!("Bad E");
-                self.pc = self.pc + 2;
+                match get_last_byte(op) {
+                    0x9E => {
+                        if keys.contains(&(self.registers[get_second_nibble(op) as usize] as u16)) {
+                            self.increment_pc();
+                        }
+                    },
+                    0xA1 => {
+                        if !keys.contains(&(self.registers[get_second_nibble(op) as usize] as u16)) {
+                            self.increment_pc();
+                        }
+                    },
+                    _ => panic!("Bad op code {:X}", op)
+                }
+
+                self.increment_pc();
             },
             0xF => {
                 match get_last_byte(op) {
@@ -346,33 +394,36 @@ impl Chip {
                         if key.is_some() {
                             let key = key.unwrap();
                             self.registers[get_second_nibble(op) as usize] = key as u8;
-                            println!("{}", key as u8);
 
-                            self.pc = self.pc + 2;
+                            self.increment_pc();
                         }
                     },
                     0x07 => {
                         self.registers[get_second_nibble(op) as usize] = self.delay;
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
                     0x15 => {
                         self.delay = self.registers[get_second_nibble(op) as usize];
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
+                    },
+                    0x18 => {
+                        self.sound = self.registers[get_second_nibble(op) as usize];
+
+                        self.increment_pc();
                     },
                     0x1E => {
                         let reg = get_second_nibble(op) as usize;
                         let reg_value = self.registers[reg];
                         self.i = self.i + reg_value as u16;
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
                     0x29 => {
-                        println!("{:X}", op);
                         self.i = self.registers[get_second_nibble(op) as usize] as u16 * 5;
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     }
                     0x33 => {
                         let value = self.registers[get_second_nibble(op) as usize];
@@ -381,7 +432,7 @@ impl Chip {
                         self.memory[self.i as usize + 1] = (value % 100) / 10;
                         self.memory[self.i as usize + 2] = value % 100 % 10;
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
                     0x55 => {
                         let x = get_second_nibble(op);
@@ -389,7 +440,7 @@ impl Chip {
                             self.memory[(self.i + idx as u16) as usize] = self.registers[idx as usize];
                         }
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
                     0x65 => {
                         let x = get_second_nibble(op);
@@ -397,77 +448,12 @@ impl Chip {
                             self.registers[idx as usize] = self.memory[(self.i + idx as u16) as usize];
                         }
 
-                        self.pc = self.pc + 2;
+                        self.increment_pc();
                     },
                     _ => panic!(format!("Unsupported 0xF instruction {:X}", op))
                 }
             },
             _ => panic!(format!("Unsupported instruction {:X}", op))
         }
-    }
-}
-
-#[inline(always)]
-fn get_first_nibble(num: u16) -> u8 {
-    ((num & 0xF000) >> 12) as u8
-}
-
-#[inline(always)]
-fn get_second_nibble(num: u16) -> u8 {
-    ((num & 0x0F00) >> 8) as u8
-}
-
-#[inline(always)]
-fn get_third_nibble(num: u16) -> u8 {
-    ((num & 0x00F0) >> 4) as u8
-}
-
-#[inline(always)]
-fn get_last_nibble(num: u16) -> u8 {
-    (num & 0x000F) as u8
-}
-
-#[inline(always)]
-fn get_addr(num: u16) -> u16 {
-    num & 0x0FFF
-}
-
-#[inline(always)]
-fn get_last_byte(num: u16) -> u8 {
-    (num & 0x00FF) as u8
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_addr() {
-        assert_eq!(get_addr(0xABCD), 0xBCD);
-    }
-
-    #[test]
-    fn test_get_last_nibble() {
-        assert_eq!(get_last_nibble(0xABCD), 0xD);
-    }
-
-    #[test]
-    fn test_get_third_nibble() {
-        assert_eq!(get_third_nibble(0xABCD), 0xC);
-    }
-
-    #[test]
-    fn test_get_second_nibble() {
-        assert_eq!(get_second_nibble(0xABCD), 0xB);
-    }
-
-    #[test]
-    fn test_get_first_nibble() {
-        assert_eq!(get_first_nibble(0xABCD), 0xA);
-    }
-
-    #[test]
-    fn test_get_last_byte() {
-        assert_eq!(get_last_byte(0xABCD), 0xCD);
     }
 }
