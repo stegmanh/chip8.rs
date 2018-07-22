@@ -24,7 +24,7 @@ const WIDTH: usize = 64;
 const HEIGHT: usize = 32;
 const SCALE: usize = 2;
 const COLOR: u32 = 65280;
-const SPRITES: [[u8; 5]; 16] = [
+const STATIC_SPRITES: [[u8; 5]; 16] = [
     [0xF0, 0x90, 0x90, 0x90, 0xF0], // 0
     [0x20, 0x60, 0x20, 0x20, 0x70], // 1
     [0xF0, 0x10, 0xF0, 0x80, 0xF0], // 2
@@ -43,11 +43,27 @@ const SPRITES: [[u8; 5]; 16] = [
     [0xF0, 0x80, 0xF0, 0x80, 0x80], // F
 ];
 
-fn main() {
-    let mut file = File::open("./static/BRIX").expect("file not found");
-    let mut buffer: Vec<u8> = Vec::new();
-    file.read_to_end(&mut buffer).unwrap();
+static HELP: &'static str = "usage: rust8 [FILE]...";
 
+
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 2 {
+        return println!("{}", HELP);
+    }
+
+    let mut file = match File::open(format!("{}", args[1])) {
+        Ok(file) => file,
+        Err(e) => {
+            return println!("Error opening file:\n{:?}", e.kind());
+        }
+    };
+
+    let mut buffer: Vec<u8> = Vec::new();
+    if let Err(e) = file.read_to_end(&mut buffer) {
+        return println!("Error reading file:\n{:?}", e.kind());
+    };
     /*let mut idx = 0;
     loop {
         if idx >= buffer.len() {
@@ -59,18 +75,23 @@ fn main() {
         idx = idx + 2;
     }*/
 
-    let mut chip = Chip::new(buffer);
+    let mut chip = match Chip::try_new(buffer) {
+        Ok(c) => c,
+        Err(e) => {
+            return println!("Failed to create chip:\n{:?}", e);
+        }
+    };
 
-    let mut buffer: Vec<u32> = vec![0; WIDTH * SCALE * HEIGHT * SCALE];
-
+    // Create screen to render too
+    let mut screen_buffer: Vec<u32> = vec![0; WIDTH * SCALE * HEIGHT * SCALE];
     let mut window_options = WindowOptions::default();
     window_options.scale = Scale::X4;
-    let mut window = Window::new("Chip8",
-                                WIDTH * SCALE,
-                                HEIGHT * SCALE,
-                                window_options).unwrap_or_else(|e| {
-        panic!("{}", e);
-    });
+    let mut window = match Window::new("Chip8", WIDTH * SCALE, HEIGHT * SCALE, window_options) {
+        Ok(w) => w,
+        Err(e) => {
+            return println!("Error creating Chip8 graphical window:\n{:?}", e);
+        }
+    };
 
     let mut prev_pressed_keys = BTreeSet::new();
     let mut prev = Instant::now();
@@ -101,7 +122,7 @@ fn main() {
 
         chip.step(&selected_key, &current_pressed_keys);
 
-        chip.render_to_window(&mut buffer, &mut window);
+        chip.render_to_window(&mut screen_buffer, &mut window);
     }
 }
 
@@ -118,21 +139,27 @@ struct Chip {
 }
 
 impl Chip {
-    pub fn new(program: Vec<u8>) -> Self {
-        //assert!(program.len() % 2 == 0);
+    pub fn try_new(program: Vec<u8>) -> Result<Self, String> {
+        if program.len() > (4096 - 0x200) {
+            return Err(format!("Game program too large. Got size: {}", program.len()));
+        }
+
+        // Create memory
         let mut memory = [0; 4096];
 
-        for (sprite_idx, sprite) in SPRITES.iter().enumerate() {
-            for (index, byte) in sprite.iter().enumerate() {
-                memory[5 * sprite_idx + index] = *byte;
+        // Load sprites
+        for (sprite_idx, sprite) in STATIC_SPRITES.iter().enumerate() {
+            for (byte_index, byte) in sprite.iter().enumerate() {
+                memory[5 * sprite_idx + byte_index] = *byte;
             }
         }
 
+        // Load program into memory
         for i in 0..program.len() {
             memory[i + 0x200] = program[i]
         }
 
-        Chip {
+        Ok(Chip {
             memory: memory,
             registers: [0; 16],
             screen: [false; WIDTH * HEIGHT],
@@ -142,7 +169,7 @@ impl Chip {
             pc: 0x200,
             sp: 0,
             stack: [0; 16]
-        }
+        })
     }
 
     pub fn decrement_delay(&mut self) {
@@ -264,7 +291,7 @@ impl Chip {
             },
             0x7 => {
                 //Adds the value kk to the value of register Vx, then stores the result in Vx. 
-                let result = self.get_x_reg_value(op) as u16 + get_last_byte(op) as u16;
+                let result = self.get_x_reg_value(op).wrapping_add(get_last_byte(op));
                 self.set_x_reg_value(op, result as u8);
 
                 self.increment_pc();
@@ -295,13 +322,16 @@ impl Chip {
                         self.increment_pc();
                     },
                     0x4 => {
-                        let x = self.get_x_reg_value(op);
-                        let y = self.get_y_reg_value(op);
+                        let x = self.get_x_reg_value(op) as u16;
+                        let y = self.get_y_reg_value(op) as u16;
 
-                        let sum = x as u16 + y as u16;
+                        let sum = x + y;
                         if sum > 255 {
                             self.registers[0xF] = 1; 
+                        } else {
+                            self.registers[0xF] = 0; 
                         }
+
                         self.set_x_reg_value(op, sum as u8);
 
                         self.increment_pc();
@@ -311,11 +341,10 @@ impl Chip {
                         let y = self.registers[get_third_nibble(op) as usize];
                         if x > y {
                             self.registers[0xF] = 1;
-                            // ?? Moved here from below
-                            self.registers[get_second_nibble(op) as usize] = x - y;
                         } else {
                             self.registers[0xF] = 0;
                         }
+                        self.registers[get_second_nibble(op) as usize] = x.wrapping_sub(y);
 
                         self.increment_pc();
                     },
@@ -344,6 +373,7 @@ impl Chip {
                 let x = self.registers[get_second_nibble(op) as usize] as usize;
                 let y = self.registers[get_third_nibble(op) as usize] as usize;
 
+                let mut should_set = false;
                 for count in 0..n {
                     let byte = self.memory[i + count];
                     for byte_idx in 0..8 {
@@ -363,10 +393,16 @@ impl Chip {
                         let loc = y_offset + x_offset;
                         let next = self.screen[loc] ^ ((byte >> (7 - byte_idx) & 1) == 1);
                         if self.screen[loc] && !next {
-                            self.registers[0xF] = 1;
+                            should_set = true;
                         }
                         self.screen[loc] = next; 
                     }
+                }
+
+                if should_set {
+                    self.registers[0xF] = 1;
+                } else {
+                    self.registers[0xF] = 0;
                 }
 
                 self.increment_pc();
@@ -390,6 +426,11 @@ impl Chip {
             },
             0xF => {
                 match get_last_byte(op) {
+                    0x07 => {
+                        self.registers[get_second_nibble(op) as usize] = self.delay;
+
+                        self.increment_pc();
+                    },
                     0x0A => {
                         if key.is_some() {
                             let key = key.unwrap();
@@ -397,11 +438,6 @@ impl Chip {
 
                             self.increment_pc();
                         }
-                    },
-                    0x07 => {
-                        self.registers[get_second_nibble(op) as usize] = self.delay;
-
-                        self.increment_pc();
                     },
                     0x15 => {
                         self.delay = self.registers[get_second_nibble(op) as usize];
