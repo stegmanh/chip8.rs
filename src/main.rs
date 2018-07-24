@@ -3,6 +3,7 @@ mod utils;
 // Externs
 extern crate rand;
 extern crate minifb;
+extern crate rodio;
 
 // Standard Library
 use std::env;
@@ -11,6 +12,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::prelude::*;
 use std::time::{Instant, Duration};
+use std::sync::mpsc::channel;
 
 // Local
 use utils::*;
@@ -18,6 +20,7 @@ use utils::*;
 // Externs
 use rand::prelude::*;
 use minifb::{Key, KeyRepeat, WindowOptions, Window, Scale};
+use rodio::Sink;
 
 // Constants
 const WIDTH: usize = 64;
@@ -64,16 +67,6 @@ fn main() {
     if let Err(e) = file.read_to_end(&mut buffer) {
         return println!("Error reading file:\n{:?}", e.kind());
     };
-    /*let mut idx = 0;
-    loop {
-        if idx >= buffer.len() {
-            break;
-        }
-        let op: u16 = ((buffer[idx] as u16) << 8) + buffer[(idx + 1)] as u16;
-        println!("{}: {:04X}", idx, op);
-
-        idx = idx + 2;
-    }*/
 
     let mut chip = match Chip::try_new(buffer) {
         Ok(c) => c,
@@ -96,7 +89,42 @@ fn main() {
     let mut prev_pressed_keys = BTreeSet::new();
     let mut prev = Instant::now();
 
+    // Sound handler thread
+    let (tx, rx) = channel();
+    thread::spawn(move || {
+        // Sound set up https://docs.rs/rodio/0.8.0/rodio
+        let device = match rodio::default_output_device() {
+            Some(d) => d,
+            None => {
+                return println!("Error binding to sound output device:\nNon Found")
+            }
+        };
+        let mut sink = Sink::new(&device);
+        sink.set_volume(0.10);
+
+        // Create source
+        let source = rodio::source::SineWave::new(250);
+        sink.append(source);
+
+        // WHEW - Alrighty then
+        // So this basically just loops in a seprate thread constantly trying to read if it 
+        // should play or pause
+        loop {
+            match rx.recv() {
+                Ok(should_play) => {
+                    if should_play && sink.is_paused() {
+                        sink.play();
+                    } else if !should_play {
+                        sink.pause();
+                    }
+                },
+                Err(e) => {}
+            };
+        }
+    });
+
     while window.is_open() {
+        // A series of hacks to determine if it's a keypress or if it's a key hold(en) ha
         let mut current_pressed_keys = BTreeSet::new();
         window.get_keys()
             .unwrap().iter()
@@ -117,7 +145,10 @@ fn main() {
         // Meh
         if elapsed > Duration::from_micros(16666) {
             prev = now;
+            // Ignoring result here because it doesnt _really_ matter if send fails
+            tx.send(chip.sound > 0);
             chip.decrement_delay();
+            chip.decrement_sound();
         }
 
         chip.step(&selected_key, &current_pressed_keys);
@@ -172,9 +203,17 @@ impl Chip {
         })
     }
 
+    #[inline(always)]
     pub fn decrement_delay(&mut self) {
         if self.delay > 0 {
             self.delay = self.delay - 1;
+        }
+    }
+
+    #[inline(always)]
+    pub fn decrement_sound(&mut self) {
+        if self.sound > 0 {
+            self.sound = self.sound - 1;
         }
     }
 
@@ -337,14 +376,16 @@ impl Chip {
                         self.increment_pc();
                     },
                     0x5 => {
-                        let x = self.registers[get_second_nibble(op) as usize];
-                        let y = self.registers[get_third_nibble(op) as usize];
+                        let x = self.get_x_reg_value(op);
+                        let y = self.get_y_reg_value(op);
+
                         if x > y {
                             self.registers[0xF] = 1;
                         } else {
                             self.registers[0xF] = 0;
                         }
-                        self.registers[get_second_nibble(op) as usize] = x.wrapping_sub(y);
+
+                        self.set_x_reg_value(op, x.wrapping_sub(y));
 
                         self.increment_pc();
                     },
@@ -360,18 +401,16 @@ impl Chip {
                 // The interpreter generates a random number from 0 to 255, 
                 // then ANDed with the value kk. The results are stored in Vx. 
                 let rand: u8 = random();
-                let kk = get_last_byte(op);
-                let val = rand & kk;
+                let val = rand & get_last_byte(op);
 
-                let reg = get_second_nibble(op) as usize;
-                self.registers[reg] = val;
+                self.set_x_reg_value(op, val);
                 self.increment_pc();
             },
             0xD => {
                 let i = self.i as usize;
                 let n = get_last_nibble(op) as usize;
-                let x = self.registers[get_second_nibble(op) as usize] as usize;
-                let y = self.registers[get_third_nibble(op) as usize] as usize;
+                let x = self.get_x_reg_value(op) as usize;
+                let y = self.get_y_reg_value(op) as usize;
 
                 let mut should_set = false;
                 for count in 0..n {
@@ -410,19 +449,21 @@ impl Chip {
             0xE => {
                 match get_last_byte(op) {
                     0x9E => {
-                        if keys.contains(&(self.registers[get_second_nibble(op) as usize] as u16)) {
+                        if keys.contains(&(self.get_x_reg_value(op) as u16)) {
                             self.increment_pc();
                         }
+
+                        self.increment_pc();
                     },
                     0xA1 => {
-                        if !keys.contains(&(self.registers[get_second_nibble(op) as usize] as u16)) {
+                        if !keys.contains(&(self.get_x_reg_value(op) as u16)) {
                             self.increment_pc();
                         }
-                    },
-                    _ => panic!("Bad op code {:X}", op)
-                }
 
-                self.increment_pc();
+                        self.increment_pc();
+                    },
+                    _ => invalid_instruction(op)
+                }
             },
             0xF => {
                 match get_last_byte(op) {
@@ -486,10 +527,10 @@ impl Chip {
 
                         self.increment_pc();
                     },
-                    _ => panic!(format!("Unsupported 0xF instruction {:X}", op))
+                    _ => invalid_instruction(op)
                 }
             },
-            _ => panic!(format!("Unsupported instruction {:X}", op))
+            _ => panic!(format!("Unsupported 0xF instruction {:X}", op))
         }
     }
 }
