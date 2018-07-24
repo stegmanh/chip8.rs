@@ -3,6 +3,19 @@ A chip 9 interpreter written in Rust. Built by referencing Cowgod's great chip-8
 
 This is now _mostly_ complete. There might be some instructions missing - but it runs PONG and BRIX (along with a few others).
 
+## Usage
+Run: 
+
+`$ cargo run PATH_TO_ROM`
+
+Build
+
+`$ cargo build`
+
+As noted below - running with release is not recommended right now.
+
+## Notes
+
 #### Code
 This was my first crack at an emulator like program. I went with a rather rudimentary approach where I `switch`ed on each `opcode` and stepped accordingly.
 
